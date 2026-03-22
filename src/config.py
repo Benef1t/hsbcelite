@@ -8,7 +8,7 @@ class Config:
     # HSBC
     HSBC_USERNAME = os.getenv("HSBC_USERNAME", "")
     HSBC_PASSWORD = os.getenv("HSBC_PASSWORD", "")
-    HSBC_BASE_URL = os.getenv("HSBC_BASE_URL", "https://www.hsbc.com.hk")
+    HSBC_BASE_URL = os.getenv("HSBC_BASE_URL", "https://www.us.hsbc.com")
 
     # Google Sheets
     GOOGLE_SHEETS_ID = os.getenv("GOOGLE_SHEETS_ID", "")
@@ -22,36 +22,19 @@ class Config:
     # Browser
     HEADLESS = os.getenv("HEADLESS", "true").lower() == "true"
 
-    # Region-specific URL patterns
-    REGION_URLS = {
-        "https://www.hsbc.com.hk": {
-            "login": "/ways-to-bank/online-banking/login",
-            "rewards": "/rewards",
-            "statements": "/credit-cards/statements",
-        },
-        "https://www.hsbc.com.sg": {
-            "login": "/ways-to-bank/online-banking/login",
-            "rewards": "/rewards",
-            "statements": "/credit-cards/statements",
-        },
-        "https://www.hsbc.co.uk": {
-            "login": "/ways-to-bank/online-banking/login",
-            "rewards": "/rewards",
-            "statements": "/credit-cards/statements",
-        },
-        "https://www.hsbc.com.my": {
-            "login": "/ways-to-bank/online-banking/login",
-            "rewards": "/rewards",
-            "statements": "/credit-cards/statements",
-        },
-    }
+    # HSBC US specific URLs
+    # The online banking portal for HSBC US
+    LOGIN_URL = "https://www.us.hsbc.com/online-banking/"
+    # After login, the dashboard/account overview
+    DASHBOARD_URL = "https://www.us.hsbc.com/my-dashboard/"
+    # Credit card section in online banking (PFM = Personal Financial Management)
+    CREDIT_CARD_URL = "https://onlinebanking.us.hsbc.com/gbi/credit-cards"
+    # Rewards points page
+    REWARDS_URL = "https://onlinebanking.us.hsbc.com/gbi/rewards"
 
     @classmethod
     def get_login_url(cls):
-        region = cls.REGION_URLS.get(cls.HSBC_BASE_URL, {})
-        return cls.HSBC_BASE_URL + region.get(
-            "login", "/ways-to-bank/online-banking/login"
-        )
+        return cls.LOGIN_URL
 
     @classmethod
     def validate(cls):
