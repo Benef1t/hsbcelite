@@ -9,6 +9,7 @@ Sheet format:
 """
 
 import logging
+import re
 from datetime import datetime
 
 import gspread
@@ -52,16 +53,36 @@ def ensure_headers(worksheet):
         logger.info("Headers set up")
 
 
+def _normalize(value: str) -> str:
+    """
+    Normalize a string for deduplication comparison.
+
+    Handles differences caused by Google Sheets auto-formatting:
+    - Collapse whitespace (tabs, newlines, multiple spaces -> single space)
+    - Strip leading/trailing whitespace
+    - Remove currency symbols and commas from amounts
+    - Lowercase for case-insensitive matching
+    """
+    s = value.strip()
+    s = re.sub(r"\s+", " ", s)  # collapse whitespace
+    s = re.sub(r"[$,]", "", s)  # strip $ and commas
+    s = s.lower()
+    return s
+
+
 def get_existing_transactions(worksheet) -> set[tuple[str, str, str]]:
     """
-    Get set of (date, description, amount) tuples for existing transactions.
-    Used to avoid duplicates.
+    Get set of normalized (date, description, amount) tuples for dedup.
+
+    Uses RAW value format to avoid Google Sheets display formatting issues.
     """
+    # Use get_all_values with value_render_option to get raw/unformatted values
     all_records = worksheet.get_all_values()
     existing = set()
     for row in all_records[1:]:  # Skip header
         if len(row) >= 3:
-            existing.add((row[0], row[1], row[2]))
+            key = (_normalize(row[0]), _normalize(row[1]), _normalize(row[2]))
+            existing.add(key)
     return existing
 
 
@@ -69,8 +90,10 @@ def sync_to_sheets(transactions: list[dict]) -> int:
     """
     Sync transactions to Google Sheet. Returns count of new rows added.
 
-    Deduplicates by (date, description, amount) to avoid inserting
-    the same transaction twice across multiple runs.
+    Deduplicates by normalized (date, description, amount) to handle:
+    - Google Sheets auto-formatting dates/numbers differently from raw scrape
+    - Whitespace variations in merchant descriptions across scrapes
+    - Currency symbol/comma differences
     """
     if not transactions:
         logger.info("No transactions to sync")
@@ -93,12 +116,18 @@ def sync_to_sheets(transactions: list[dict]) -> int:
     new_rows = []
 
     for txn in transactions:
-        key = (txn["date"], txn["description"], txn["amount"])
+        # Normalize the key fields before comparison
+        key = (
+            _normalize(txn["date"]),
+            _normalize(txn["description"]),
+            _normalize(txn["amount"]),
+        )
         if key not in existing:
             new_rows.append([
                 txn["date"],
                 txn["description"],
-                txn["amount"],
+                # Prefix amount with ' to force Google Sheets to treat as text
+                "'" + txn["amount"] if txn["amount"] else "",
                 txn.get("currency", ""),
                 txn["points"],
                 txn.get("card_last_four", ""),
@@ -106,10 +135,12 @@ def sync_to_sheets(transactions: list[dict]) -> int:
                 sync_time,
             ])
             existing.add(key)  # Prevent dupes within same batch
+        else:
+            logger.debug(f"Skipping duplicate: {txn['date']} {txn['description']}")
 
     if new_rows:
-        # Append all new rows at once
-        worksheet.append_rows(new_rows, value_input_option="USER_ENTERED")
+        # Use RAW to prevent Google Sheets from re-interpreting values
+        worksheet.append_rows(new_rows, value_input_option="RAW")
         logger.info(f"Added {len(new_rows)} new transactions to Google Sheet")
     else:
         logger.info("No new transactions to add (all already exist)")
