@@ -90,17 +90,30 @@ def login(page) -> bool:
     page.goto(login_url, wait_until="networkidle", timeout=60000)
     take_screenshot(page, "01_login_page")
 
-    # HSBC US sometimes uses an iframe for the login form
-    login_frame = page
-    frames = page.frames
-    for frame in frames:
-        if "login" in frame.url.lower() or "logon" in frame.url.lower():
-            login_frame = frame
-            logger.info(f"Found login iframe: {frame.url}")
-            break
+    # Check if already authenticated (persistent profile with valid session)
+    current_url = page.url.lower()
+    if (
+        "onlinebanking.us.hsbc.com" in current_url
+        or "my-dashboard" in current_url
+        or ("dashboard" in current_url and "us.hsbc.com" in current_url)
+    ):
+        logger.info(f"Already authenticated - session reused from persistent profile: {page.url}")
+        return True
 
-    # --- STEP 1: Enter Username ---
-    # HSBC US login field selectors
+    # Also check: if the security frame doesn't appear within 5s, assume already logged in
+    security_frame_found = False
+    for _ in range(10):  # poll for up to 5s (10 × 0.5s)
+        page.wait_for_timeout(500)
+        if any("security" in f.url for f in page.frames):
+            security_frame_found = True
+            break
+    if not security_frame_found:
+        take_screenshot(page, "01b_no_security_frame")
+        logger.info(f"No security/login frame detected — assuming already logged in at: {page.url}")
+        return True
+
+    # HSBC US sometimes uses an iframe for the login form (possibly cross-origin)
+    # Try main page first, then all frames
     username_selectors = [
         'input[name="userid"]',
         'input[id="userid"]',
@@ -116,18 +129,30 @@ def login(page) -> bool:
         'form[name="logonForm"] input[type="text"]',
         # Generic fallback
         'input[type="text"]:visible',
+        'input[type="text"]',
     ]
 
+    # --- STEP 1: Enter Username ---
+    # Search for username field in the main page and ALL frames
     username_field = None
-    for selector in username_selectors:
-        try:
-            field = login_frame.wait_for_selector(selector, timeout=3000)
-            if field and field.is_visible():
-                username_field = field
-                logger.info(f"Found username field: {selector}")
-                break
-        except Exception:
-            continue
+    login_frame = page
+
+    # Build list: main page first, then all frames
+    frames_to_try = [page] + list(page.frames)
+    for frame in frames_to_try:
+        logger.info(f"Checking frame: {frame.url}")
+        for selector in username_selectors:
+            try:
+                field = frame.wait_for_selector(selector, timeout=2000)
+                if field and field.is_visible():
+                    username_field = field
+                    login_frame = frame
+                    logger.info(f"Found username field in frame {frame.url}: {selector}")
+                    break
+            except Exception:
+                continue
+        if username_field:
+            break
 
     if not username_field:
         take_screenshot(page, "error_no_username_field")
@@ -167,14 +192,46 @@ def login(page) -> bool:
     if not clicked_continue:
         logger.info("No Continue button found - may be single-page login")
 
-    # --- STEP 3: Enter Password ---
-    # Re-detect frame after possible navigation
-    login_frame = page
-    for frame in page.frames:
-        if "login" in frame.url.lower() or "logon" in frame.url.lower():
-            login_frame = frame
+    # --- STEP 2b: Click "Log on using password" if security device screen appears ---
+    # HSBC defaults to Digital Security Device after Continue; wait for the page to settle
+    # then look for the "Log on using password" link before trying the password field.
+    page.wait_for_timeout(3000)
+    take_screenshot(page, "02a_waiting_for_security_or_password")
+
+    password_link_selectors = [
+        'a:has-text("Log on using password")',
+        'a:has-text("log on using password")',
+        'button:has-text("Log on using password")',
+        'a:has-text("Log on using password")',  # case-insensitive handled by has-text
+        'a:has-text("Use password instead")',
+        'a:has-text("Use my password")',
+        'a[href*="password"]:visible',
+    ]
+
+    password_link_found = False
+    frames_to_try_now = [page] + list(page.frames)
+    for frame in frames_to_try_now:
+        for selector in password_link_selectors:
+            try:
+                # Use wait_for_selector with 12s timeout to handle delayed page load
+                link = frame.wait_for_selector(selector, timeout=12000)
+                if link and link.is_visible():
+                    logger.info(f"Found 'Log on using password' link: {selector} — clicking it")
+                    link.click()
+                    page.wait_for_timeout(3000)
+                    take_screenshot(page, "02b_after_password_link")
+                    password_link_found = True
+                    break
+            except Exception:
+                continue
+        if password_link_found:
             break
 
+    if not password_link_found:
+        logger.info("No 'Log on using password' link found — assuming password field is already visible")
+
+    # --- STEP 3: Enter Password ---
+    # Re-detect frame after possible navigation - check ALL frames
     password_selectors = [
         'input[name="password"]',
         'input[id="password"]',
@@ -186,15 +243,21 @@ def login(page) -> bool:
     ]
 
     password_field = None
-    for selector in password_selectors:
-        try:
-            field = login_frame.wait_for_selector(selector, timeout=5000)
-            if field and field.is_visible():
-                password_field = field
-                logger.info(f"Found password field: {selector}")
-                break
-        except Exception:
-            continue
+    login_frame = page
+    frames_to_try = [page] + list(page.frames)
+    for frame in frames_to_try:
+        for selector in password_selectors:
+            try:
+                field = frame.wait_for_selector(selector, timeout=3000)
+                if field and field.is_visible():
+                    password_field = field
+                    login_frame = frame
+                    logger.info(f"Found password field in frame {frame.url}: {selector}")
+                    break
+            except Exception:
+                continue
+        if password_field:
+            break
 
     if not password_field:
         take_screenshot(page, "error_no_password_field")
@@ -236,10 +299,56 @@ def login(page) -> bool:
     except Exception:
         pass
 
-    # HSBC US may show security questions or additional verification
-    # Wait a moment for any interstitial pages
-    page.wait_for_timeout(3000)
+    # Wait for post-login / any 2FA page to load and settle
+    page.wait_for_timeout(10000)
     take_screenshot(page, "03_after_login")
+
+    # --- Detect "We don't recognize your browser" device verification challenge ---
+    # HSBC shows this when the persistent profile's device cookie has expired or
+    # the browser fingerprint changed. It requires human interaction to resolve.
+    device_challenge_selectors = [
+        'text="We don\'t recognize your browser"',
+        'text="don\'t recognize your browser"',
+        'text="Generate a code using the Mobile Banking App"',
+        'text="Send SMS"',
+        'text="Unable to generate or receive code"',
+    ]
+    on_device_challenge = False
+    for sel in device_challenge_selectors:
+        try:
+            if page.query_selector(sel):
+                on_device_challenge = True
+                break
+        except Exception:
+            continue
+
+    if on_device_challenge:
+        take_screenshot(page, "03b_device_challenge")
+        if not Config.HEADLESS:
+            logger.warning(
+                "HSBC device verification challenge detected. "
+                "Please complete the verification in the browser window "
+                "(choose SMS, email, or app code). Waiting up to 3 minutes..."
+            )
+            for _ in range(360):  # 3 min at 0.5s intervals
+                page.wait_for_timeout(500)
+                url = page.url.lower()
+                if "onlinebanking.us.hsbc.com" in url or (
+                    "dashboard" in url and "us.hsbc.com" in url
+                ):
+                    logger.info(f"Device verification completed — redirected to: {page.url}")
+                    take_screenshot(page, "03c_after_device_verify")
+                    return True
+            logger.error("Timed out waiting for device verification (3 min elapsed)")
+            take_screenshot(page, "error_device_verify_timeout")
+            return False
+        else:
+            raise RuntimeError(
+                "HSBC device verification required but browser is running headless. "
+                "Run once with HEADLESS=false to register this browser:\n"
+                "  HEADLESS=false python -m src.main --dry-run\n"
+                "Complete the verification in the browser window, then switch back to headless."
+            )
 
     # Check for successful login indicators (HSBC US dashboard)
     success_indicators = [
@@ -292,139 +401,110 @@ def login(page) -> bool:
     return True
 
 
+def _save_page_html(page, name: str):
+    """Save current page HTML for debugging."""
+    SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+    path = SCREENSHOTS_DIR / f"debug_{name}.html"
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(page.content())
+    logger.info(f"Saved page HTML to {path}")
+
+
+def _has_transaction_content(page) -> bool:
+    """Check if the current page has transaction table content."""
+    for selector in ["#transaction-table", "#transactions", ".transaction", "[class*='transaction']"]:
+        try:
+            el = page.query_selector(selector)
+            if el:
+                logger.info(f"Found transaction content: {selector}")
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _do_sso_and_wait(page, sso_url: str) -> bool:
+    """Navigate to the SSO URL and wait for redirect to rewards.us.hsbc.com. Returns True on success."""
+    try:
+        page.goto(sso_url, wait_until="networkidle", timeout=30000)
+    except Exception as e:
+        logger.warning(f"SSO navigation error (proceeding): {e}")
+    for _ in range(40):  # up to 20s
+        if "rewards.us.hsbc.com" in page.url:
+            return True
+        page.wait_for_timeout(500)
+    return "rewards.us.hsbc.com" in page.url
+
+
 def navigate_to_rewards(page) -> bool:
     """
-    Navigate to the HSBC US credit card rewards/points page.
+    Navigate to the HSBC US rewards portal and find the transaction activity page.
 
-    HSBC US shows points information in several places:
-    1. Rewards section in online banking (per-transaction points breakdown)
-    2. Credit card statement view
-    3. "View rewards activity" link from dashboard
-
-    The rewards activity page shows each transaction with its earned points.
+    Flow:
+    1. Navigate to the LaunchOver SSO URL → lands on rewards.us.hsbc.com
+    2. If SSO fails (redirected to /security or stays on us.hsbc.com), re-login and retry
+    3. Navigate to /account/transactions/ and wait for the date-range select to appear
     """
     take_screenshot(page, "04_pre_rewards_navigation")
 
-    # Strategy 1: Direct URL navigation to known HSBC US rewards pages
-    rewards_urls = [
-        # HSBC US online banking rewards pages
-        "https://onlinebanking.us.hsbc.com/gbi/rewards",
-        "https://onlinebanking.us.hsbc.com/gbi/rewards/activity",
-        "https://onlinebanking.us.hsbc.com/gbi/rewards/points-activity",
-        "https://onlinebanking.us.hsbc.com/gbi/credit-cards/rewards",
-        # Alternative paths
-        "https://www.us.hsbc.com/credit-cards/rewards/",
-        "https://www.us.hsbc.com/rewards/",
-    ]
+    sso_url = "https://www.lgsso.online-banking.us.hsbc.com/lgapp-rwdeng/services/LaunchOver"
+    transactions_url = "https://rewards.us.hsbc.com/account/transactions/"
 
-    for url in rewards_urls:
-        try:
-            logger.info(f"Trying rewards URL: {url}")
-            response = page.goto(url, wait_until="networkidle", timeout=20000)
-            if response and response.status == 200 and "login" not in page.url.lower():
-                take_screenshot(page, "05_rewards_page")
-                logger.info(f"Navigated to rewards: {url}")
-                return True
-        except Exception as e:
-            logger.debug(f"URL {url} failed: {e}")
-            continue
+    # --- Step 1: Navigate via SSO to rewards portal ---
+    logger.info(f"Navigating to rewards SSO URL: {sso_url}")
+    sso_ok = _do_sso_and_wait(page, sso_url)
+    logger.info(f"SSO result — at: {page.url}")
 
-    # Strategy 2: Navigate from dashboard - click through menus
-    # Go back to dashboard first
+    # --- Step 2: Handle SSO failure (expired token → /security or stayed on us.hsbc.com) ---
+    if not sso_ok or "/security" in page.url or "rewards.us.hsbc.com" not in page.url:
+        logger.warning(f"SSO redirect failed (landed on {page.url}), attempting re-login...")
+        if not login(page):
+            raise RuntimeError("Re-login after SSO failure also failed")
+        logger.info("Re-navigating to SSO URL after re-login...")
+        sso_ok = _do_sso_and_wait(page, sso_url)
+        if not sso_ok:
+            take_screenshot(page, "error_sso_retry_failed")
+            raise RuntimeError(f"SSO redirect failed after re-login — still on: {page.url}")
+        logger.info(f"SSO retry succeeded — at: {page.url}")
+
+    # Give the Nuxt SPA a moment to establish auth state
+    page.wait_for_timeout(3000)
+    take_screenshot(page, "05a_rewards_landing")
+
+    # --- Step 3: Navigate to transactions page and wait for SPA to render ---
+    logger.info(f"Navigating to transactions page: {transactions_url}")
     try:
-        page.goto(
-            "https://onlinebanking.us.hsbc.com/gbi/dashboard",
-            wait_until="networkidle",
-            timeout=20000,
-        )
-    except Exception:
-        pass
+        page.goto(transactions_url, wait_until="networkidle", timeout=20000)
+    except Exception as e:
+        logger.warning(f"Transactions page navigation error (proceeding): {e}")
 
-    nav_selectors = [
-        # Credit cards menu/section
-        'a:has-text("Credit Cards")',
-        'a:has-text("Credit cards")',
-        'a:has-text("Cards")',
-        # Rewards specific links
-        'a:has-text("Rewards")',
-        'a:has-text("Points")',
-        'a:has-text("View rewards")',
-        'a:has-text("Rewards activity")',
-        'a:has-text("Points activity")',
-        # HSBC US navigation elements
-        '[data-menu-item*="credit"] a',
-        '[data-menu-item*="reward"] a',
-        'nav a[href*="reward"]',
-        'nav a[href*="credit"]',
-    ]
-
-    for selector in nav_selectors:
+    # Wait for the date-range select to confirm the SPA has loaded the transactions view.
+    # If it doesn't appear, retry once after a short wait.
+    date_select = None
+    for attempt in range(2):
         try:
-            link = page.query_selector(selector)
-            if link and link.is_visible():
-                link.click()
-                page.wait_for_load_state("networkidle", timeout=15000)
-                page.wait_for_timeout(2000)
-                take_screenshot(page, "05_rewards_page")
-
-                # Check if we're on a rewards-like page
-                page_text = page.text_content("body") or ""
-                if any(
-                    kw in page_text.lower()
-                    for kw in ["reward", "points", "earned", "bonus"]
-                ):
-                    logger.info(f"Found rewards content via: {selector}")
-                    return True
+            date_select = page.wait_for_selector("select.custom-select", timeout=15000)
         except Exception:
-            continue
-
-    # Strategy 3: Look for credit card in account list, then find rewards
-    try:
-        # Click on credit card account
-        cc_selectors = [
-            '[class*="credit-card"] a',
-            'a[href*="credit-card"]',
-            'div:has-text("Credit Card") a',
-            '[class*="account-tile"]:has-text("Credit") a',
-        ]
-        for sel in cc_selectors:
+            date_select = None
+        if date_select:
+            break
+        if attempt == 0:
+            logger.warning(
+                f"Date-range select not found on attempt 1 (URL: {page.url}), retrying..."
+            )
+            page.wait_for_timeout(3000)
             try:
-                el = page.query_selector(sel)
-                if el and el.is_visible():
-                    el.click()
-                    page.wait_for_load_state("networkidle", timeout=15000)
-                    take_screenshot(page, "05_credit_card_page")
+                page.goto(transactions_url, wait_until="networkidle", timeout=20000)
+            except Exception as e:
+                logger.warning(f"Transactions page retry navigation error: {e}")
 
-                    # Now look for rewards/points link on the card page
-                    for reward_sel in [
-                        'a:has-text("Rewards")',
-                        'a:has-text("Points")',
-                        'a:has-text("View activity")',
-                        '[class*="reward"]',
-                    ]:
-                        try:
-                            r = page.query_selector(reward_sel)
-                            if r and r.is_visible():
-                                r.click()
-                                page.wait_for_load_state(
-                                    "networkidle", timeout=15000
-                                )
-                                take_screenshot(page, "05_rewards_page")
-                                logger.info("Found rewards via credit card page")
-                                return True
-                        except Exception:
-                            continue
-            except Exception:
-                continue
-    except Exception:
-        pass
+    if not date_select:
+        logger.warning(f"Date-range select still not found after retry (URL: {page.url})")
 
-    take_screenshot(page, "error_no_rewards_page")
-    logger.error(
-        "Could not navigate to rewards page. "
-        "Check screenshots/ and update navigate_to_rewards() selectors."
-    )
-    return False
+    take_screenshot(page, "05_rewards_page")
+    _save_page_html(page, "rewards_transactions")
+    logger.info(f"Transactions page URL: {page.url}")
+    return True
 
 
 def scrape_transactions_with_points(page) -> list[Transaction]:
@@ -446,33 +526,78 @@ def scrape_transactions_with_points(page) -> list[Transaction]:
     page.wait_for_timeout(3000)
     take_screenshot(page, "06_scraping_start")
 
-    # Check if there are tabs/filters for different periods
-    period_selectors = [
-        'select[class*="period"]',
-        'select[class*="statement"]',
-        'button:has-text("Current")',
-        'button:has-text("All")',
-        '[class*="date-range"]',
-        '[class*="filter"]',
-    ]
-    for sel in period_selectors:
+    # The HSBC rewards portal has a <select class="custom-select"> date-range filter.
+    # Options (by value): 7, 15, 30, 180 (6 months = widest recent), old (pre-cutoff).
+    # Scrape each period that yields rows and combine results.
+    def _scrape_table_rows(seen_descs: set) -> list[Transaction]:
+        """Extract transaction rows from #transaction-table on the current page."""
+        result = []
         try:
-            el = page.query_selector(sel)
-            if el and el.is_visible():
-                logger.info(f"Found period/filter control: {sel}")
-                # If it's a select, try to select "All" or widest range
-                if sel.startswith("select"):
-                    options = el.query_selector_all("option")
-                    for opt in options:
-                        text = opt.text_content().lower()
-                        if "all" in text or "12" in text or "year" in text:
-                            el.select_option(label=opt.text_content())
-                            page.wait_for_load_state("networkidle", timeout=10000)
-                            page.wait_for_timeout(2000)
-                            break
-                break
-        except Exception:
-            continue
+            table = page.query_selector("#transaction-table")
+            if not table:
+                return result
+            rows = table.query_selector_all("tr")
+            for row in rows[1:]:  # skip header
+                cells = row.query_selector_all("td")
+                if len(cells) < 3:
+                    continue
+                raw_desc = (cells[0].text_content() or "").strip()
+                if not raw_desc:
+                    continue
+                raw_date = ""
+
+                # Handle redemption rows ("Pay with your Points! Redeem X Points ($Y.YY)")
+                if "Pay with your Points" in raw_desc or "Redeem" in raw_desc:
+                    raw_desc = "[Redemption] " + raw_desc.split("Redeem")[0].strip()
+                    # No date in these rows; leave raw_date empty
+                else:
+                    # Pattern covers: Purchase, Purchase Return, Fee, Other, etc.
+                    m = re.match(
+                        r'^(\w+ \d+, \d{4}) - (?:Purchase Return|Purchase|Fee|Other)?(.*)$',
+                        raw_desc,
+                    )
+                    if m:
+                        raw_date = m.group(1).strip()
+                        raw_desc = m.group(2).strip()
+                amount = (cells[1].text_content() or "").strip() if len(cells) > 1 else ""
+                points = (cells[4].text_content() or "").strip() if len(cells) > 4 else ""
+                dedup_key = f"{raw_date}|{raw_desc}|{amount}"
+                if dedup_key in seen_descs:
+                    continue
+                seen_descs.add(dedup_key)
+                result.append(Transaction(
+                    date=raw_date,
+                    description=raw_desc,
+                    amount=amount,
+                    currency="USD",
+                    points=points,
+                    card_last_four="",
+                    scraped_at=now,
+                ))
+        except Exception as e:
+            logger.debug(f"Table row extraction error: {e}")
+        return result
+
+    seen_keys: set = set()
+    date_filter = page.query_selector("select.custom-select")
+    if date_filter:
+        # The HSBC rewards SPA has a quirk: selecting value='old' directly returns 0 rows.
+        # Selecting value='180' first (which empties the table — a SPA bug), then
+        # selecting value='old', causes the SPA to render ALL available transactions.
+        logger.info("Selecting period '180' (priming SPA state)...")
+        date_filter.select_option(value="180")
+        page.wait_for_timeout(3000)
+
+        logger.info("Selecting period 'old' (all available transactions)...")
+        date_filter = page.query_selector("select.custom-select")
+        date_filter.select_option(value="old")
+        page.wait_for_timeout(3000)
+
+        transactions.extend(_scrape_table_rows(seen_keys))
+        logger.info(f"Scraped {len(transactions)} transactions after period select")
+        take_screenshot(page, "06b_all_periods_scraped")
+    else:
+        logger.info("No date-range select found — scraping current view")
 
     # --- Strategy 1: HTML tables ---
     table_selectors = [
@@ -506,7 +631,7 @@ def scrape_transactions_with_points(page) -> list[Transaction]:
                 date_idx = _find_column(headers, ["date", "trans date", "transaction date"])
                 desc_idx = _find_column(headers, ["description", "merchant", "details", "transaction"])
                 amount_idx = _find_column(headers, ["amount", "value", "charge"])
-                points_idx = _find_column(headers, ["points", "reward", "earned", "bonus"])
+                points_idx = _find_column(headers, ["total", "points", "reward", "earned", "bonus"])
 
                 if points_idx == -1:
                     logger.debug(f"No points column found in headers: {headers}")
@@ -524,10 +649,28 @@ def scrape_transactions_with_points(page) -> list[Transaction]:
                     ):
                         continue
 
+                    raw_desc = _cell_text(cells, desc_idx)
+                    raw_date = _cell_text(cells, date_idx)
+
+                    # Parse date embedded in description:
+                    # e.g. "Mar 20, 2026 - PurchaseANTHROPIC" → date + clean desc
+                    date_in_desc = re.match(
+                        r'^(\w+ \d+, \d{4}) - (?:Purchase Return|Purchase|Fee|Other)?(.*)$', raw_desc
+                    )
+                    if date_in_desc:
+                        raw_date = date_in_desc.group(1)
+                        raw_desc = date_in_desc.group(2).strip()
+
+                    raw_amount = _cell_text(cells, amount_idx)
+                    dedup_key = f"{raw_date}|{raw_desc}|{raw_amount}"
+                    if dedup_key in seen_keys:
+                        continue
+                    seen_keys.add(dedup_key)
+
                     txn = Transaction(
-                        date=_cell_text(cells, date_idx),
-                        description=_cell_text(cells, desc_idx),
-                        amount=_cell_text(cells, amount_idx),
+                        date=raw_date,
+                        description=raw_desc,
+                        amount=raw_amount,
                         currency="USD",
                         points=_cell_text(cells, points_idx),
                         card_last_four="",
@@ -610,6 +753,73 @@ def scrape_transactions_with_points(page) -> list[Transaction]:
                 logger.debug(f"Item strategy error for {item_sel}: {e}")
                 continue
 
+    # --- Pagination: click "Load more" / "Next" to get all transactions ---
+    if transactions:
+        page_num = 1
+        while True:
+            load_more = None
+            for sel in [
+                'button:has-text("Load more")',
+                'button:has-text("Show more")',
+                'a:has-text("Load more")',
+                'a:has-text("Next")',
+                'button:has-text("Next")',
+                '[class*="load-more"]',
+                '[class*="pagination"] [aria-label="Next"]',
+            ]:
+                try:
+                    el = page.query_selector(sel)
+                    if el and el.is_visible():
+                        load_more = el
+                        break
+                except Exception:
+                    continue
+
+            if not load_more:
+                break
+
+            page_num += 1
+            logger.info(f"Loading more transactions (page {page_num})...")
+            load_more.click()
+            page.wait_for_timeout(3000)
+
+            # Scrape newly loaded rows from the same table
+            new_count = 0
+            try:
+                tables = page.query_selector_all("#transaction-table, table")
+                for table in tables:
+                    rows = table.query_selector_all("tr")
+                    for row in rows[1 + len(transactions):]:  # skip already-scraped rows
+                        cells = row.query_selector_all("td")
+                        if len(cells) < 2:
+                            continue
+                        raw_desc = cells[0].text_content().strip() if cells else ""
+                        raw_date = ""
+                        m = re.match(r'^(\w+ \d+, \d{4}) - (?:Purchase)?(.*)$', raw_desc)
+                        if m:
+                            raw_date = m.group(1)
+                            raw_desc = m.group(2).strip()
+                        points_text = cells[4].text_content().strip() if len(cells) > 4 else ""
+                        amount_text = cells[1].text_content().strip() if len(cells) > 1 else ""
+                        if raw_desc:
+                            transactions.append(Transaction(
+                                date=raw_date,
+                                description=raw_desc,
+                                amount=amount_text,
+                                currency="USD",
+                                points=points_text,
+                                card_last_four="",
+                                scraped_at=now,
+                            ))
+                            new_count += 1
+            except Exception as e:
+                logger.debug(f"Pagination scrape error: {e}")
+
+            if new_count == 0:
+                logger.info("No new rows after pagination — stopping")
+                break
+            logger.info(f"Loaded {new_count} more transactions (total: {len(transactions)})")
+
     # --- Strategy 3: Parse visible page text as a fallback ---
     if not transactions:
         logger.warning(
@@ -662,9 +872,9 @@ def scrape_transactions_with_points(page) -> list[Transaction]:
 
 
 def _find_column(headers: list[str], keywords: list[str]) -> int:
-    """Find column index matching any of the keywords."""
-    for i, h in enumerate(headers):
-        for kw in keywords:
+    """Find column index matching any of the keywords, in keyword priority order."""
+    for kw in keywords:
+        for i, h in enumerate(headers):
             if kw in h:
                 return i
     return -1
@@ -677,22 +887,28 @@ def _cell_text(cells, idx: int) -> str:
     return cells[idx].text_content().strip()
 
 
+BROWSER_PROFILE_DIR = Path("credentials/browser_profile")
+
+
 def scrape_hsbc_points() -> list[dict]:
     """
     Main entry point. Launches browser, logs in, scrapes points, returns data.
+
+    Uses a persistent browser profile so HSBC remembers the device between runs,
+    avoiding repeated device-verification challenges after the first manual login.
     """
     transactions = []
+    BROWSER_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+    logger.info(f"Using persistent browser profile at {BROWSER_PROFILE_DIR}")
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(
+        context = p.chromium.launch_persistent_context(
+            user_data_dir=str(BROWSER_PROFILE_DIR),
             headless=Config.HEADLESS,
             args=[
                 "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",
             ],
-        )
-
-        context = browser.new_context(
             viewport={"width": 1280, "height": 900},
             user_agent=(
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -705,32 +921,15 @@ def scrape_hsbc_points() -> list[dict]:
 
         page = context.new_page()
 
-        # Try session reuse with saved cookies
-        cookies_loaded = load_cookies(context)
-
         try:
-            if cookies_loaded:
-                logger.info("Attempting session reuse...")
-                page.goto(
-                    "https://onlinebanking.us.hsbc.com/gbi/dashboard",
-                    wait_until="networkidle",
-                    timeout=20000,
-                )
-                # If redirected to login, session expired
-                if "login" in page.url.lower() or "logon" in page.url.lower():
-                    logger.info("Session expired, logging in again")
-                    cookies_loaded = False
-
-            if not cookies_loaded:
-                if not login(page):
-                    logger.error("Login failed")
-                    browser.close()
-                    return []
-                save_cookies(context)
+            if not login(page):
+                logger.error("Login failed")
+                context.close()
+                return []
 
             if not navigate_to_rewards(page):
                 logger.error("Could not navigate to rewards page")
-                browser.close()
+                context.close()
                 return []
 
             raw_transactions = scrape_transactions_with_points(page)
@@ -741,6 +940,6 @@ def scrape_hsbc_points() -> list[dict]:
             take_screenshot(page, "error_exception")
             raise
         finally:
-            browser.close()
+            context.close()
 
     return transactions

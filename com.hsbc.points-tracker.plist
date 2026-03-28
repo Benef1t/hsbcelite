@@ -1,5 +1,5 @@
-<!-- Mac LaunchAgent for running HSBC Points Tracker twice daily -->
-<!-- Copy this to ~/Library/LaunchAgents/ and update the paths below -->
+<!-- Mac LaunchAgent for running HSBC Points Tracker daily at 7:00 AM -->
+<!-- Copy this to ~/Library/LaunchAgents/ -->
 <!-- Then: launchctl load ~/Library/LaunchAgents/com.hsbc.points-tracker.plist -->
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -10,39 +10,27 @@
 
     <key>ProgramArguments</key>
     <array>
-        <!-- UPDATE THIS PATH to your project directory -->
-        <string>/path/to/hsbcelite/.venv/bin/python</string>
+        <string>/Users/bruce/claudeSpace/hsbcelite/.venv/bin/python</string>
         <string>-m</string>
         <string>src.main</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <!-- UPDATE THIS PATH to your project directory -->
-    <string>/path/to/hsbcelite</string>
+    <string>/Users/bruce/claudeSpace/hsbcelite</string>
 
-    <!-- Run at 9:00 AM and 9:00 PM daily -->
+    <!-- Run at 7:00 AM daily -->
     <key>StartCalendarInterval</key>
-    <array>
-        <dict>
-            <key>Hour</key>
-            <integer>9</integer>
-            <key>Minute</key>
-            <integer>0</integer>
-        </dict>
-        <dict>
-            <key>Hour</key>
-            <integer>21</integer>
-            <key>Minute</key>
-            <integer>0</integer>
-        </dict>
-    </array>
+    <dict>
+        <key>Hour</key>
+        <integer>7</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
 
     <key>StandardOutPath</key>
-    <!-- UPDATE THIS PATH -->
-    <string>/path/to/hsbcelite/launchd_stdout.log</string>
+    <string>/Users/bruce/claudeSpace/hsbcelite/launchd_stdout.log</string>
     <key>StandardErrorPath</key>
-    <!-- UPDATE THIS PATH -->
-    <string>/path/to/hsbcelite/launchd_stderr.log</string>
+    <string>/Users/bruce/claudeSpace/hsbcelite/launchd_stderr.log</string>
 
     <key>EnvironmentVariables</key>
     <dict>

@@ -29,7 +29,7 @@ HEADERS = [
     "Description",
     "Amount",
     "Currency",
-    "Points",
+    "Total Points",
     "Card Last 4",
     "Scraped At",
     "Sync Time",
@@ -139,10 +139,43 @@ def sync_to_sheets(transactions: list[dict]) -> int:
             logger.debug(f"Skipping duplicate: {txn['date']} {txn['description']}")
 
     if new_rows:
-        # Use RAW to prevent Google Sheets from re-interpreting values
+        # Append all new rows at once — RAW keeps values as literal strings,
+        # preventing Google Sheets from reformatting amounts/dates which would
+        # break the (date, description, amount) dedup key on subsequent runs.
         worksheet.append_rows(new_rows, value_input_option="RAW")
         logger.info(f"Added {len(new_rows)} new transactions to Google Sheet")
     else:
         logger.info("No new transactions to add (all already exist)")
+
+    # Sort all rows by date descending (newest first)
+    all_rows = worksheet.get_all_values()
+    if len(all_rows) > 2:  # Header + at least 2 data rows worth sorting
+        header = all_rows[0]
+        data_rows = all_rows[1:]
+
+        def _parse_date(row):
+            try:
+                return datetime.strptime(row[0], "%b %d, %Y")
+            except (ValueError, IndexError):
+                return datetime.min
+
+        data_rows.sort(key=_parse_date, reverse=True)
+        sorted_values = [header] + data_rows
+        worksheet.update(
+            f"A1:{chr(ord('A') + len(header) - 1)}{len(sorted_values)}",
+            sorted_values,
+            value_input_option="RAW",
+        )
+        logger.info("Sorted transactions by date (newest first)")
+
+    # Update Meta sheet with last-checked timestamp
+    try:
+        meta = spreadsheet.worksheet("Meta")
+    except gspread.WorksheetNotFound:
+        meta = spreadsheet.add_worksheet("Meta", rows=10, cols=2)
+        logger.info("Created 'Meta' worksheet")
+    last_checked = datetime.now().strftime("%Y-%m-%d %H:%M")
+    meta.update("A1:B1", [["Last checked", last_checked]])
+    logger.info(f"Meta sheet updated: last checked {last_checked}")
 
     return len(new_rows)

@@ -24,7 +24,7 @@ class Config:
 
     # HSBC US specific URLs
     # The online banking portal for HSBC US
-    LOGIN_URL = "https://www.us.hsbc.com/online-banking/"
+    LOGIN_URL = "https://www.us.hsbc.com/online/dashboard/"
     # After login, the dashboard/account overview
     DASHBOARD_URL = "https://www.us.hsbc.com/my-dashboard/"
     # Credit card section in online banking (PFM = Personal Financial Management)
