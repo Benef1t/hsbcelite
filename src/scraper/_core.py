@@ -7,6 +7,7 @@ Uses AuthSession.ensure_authenticated() instead of a re-entrant login() call.
 
 import json
 import logging
+import shutil
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -21,9 +22,14 @@ from .models import Transaction
 
 logger = logging.getLogger(__name__)
 
-SCREENSHOTS_DIR = Path("screenshots")
+SCREENSHOTS_BASE_DIR = Path("screenshots")
 COOKIES_FILE = Path("credentials/cookies.json")
 BROWSER_PROFILE_DIR = Path("credentials/browser_profile")
+
+MAX_RUNS_TO_KEEP = 4
+
+# Per-run screenshot directory, set by _init_run_dir()
+_current_run_dir: Path | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -52,10 +58,36 @@ def load_cookies(context) -> bool:
 # Debug helpers
 # ---------------------------------------------------------------------------
 
-def _take_screenshot(page, name: str) -> None:
-    SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+def _init_run_dir() -> None:
+    """Create a timestamped sub-directory for this run and prune old ones."""
+    global _current_run_dir
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = SCREENSHOTS_DIR / f"{name}_{timestamp}.png"
+    _current_run_dir = SCREENSHOTS_BASE_DIR / f"run_{timestamp}"
+    _current_run_dir.mkdir(parents=True, exist_ok=True)
+    logger.info("Screenshots for this run: %s", _current_run_dir)
+
+    # Keep only the most recent MAX_RUNS_TO_KEEP run directories
+    if SCREENSHOTS_BASE_DIR.exists():
+        run_dirs = sorted(
+            [d for d in SCREENSHOTS_BASE_DIR.iterdir()
+             if d.is_dir() and d.name.startswith("run_")],
+            key=lambda d: d.name,
+        )
+        for old_dir in run_dirs[:-MAX_RUNS_TO_KEEP]:
+            shutil.rmtree(old_dir)
+            logger.info("Pruned old screenshot dir: %s", old_dir)
+
+
+def _ensure_run_dir() -> Path:
+    """Return the current run directory, creating it if needed."""
+    if _current_run_dir is None:
+        _init_run_dir()
+    return _current_run_dir
+
+
+def _take_screenshot(page, name: str) -> None:
+    run_dir = _ensure_run_dir()
+    path = run_dir / f"{name}.png"
     try:
         page.screenshot(path=str(path), full_page=True)
         logger.info("Screenshot saved: %s", path)
@@ -64,8 +96,8 @@ def _take_screenshot(page, name: str) -> None:
 
 
 def _save_page_html(page, name: str) -> None:
-    SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
-    path = SCREENSHOTS_DIR / f"debug_{name}.html"
+    run_dir = _ensure_run_dir()
+    path = run_dir / f"debug_{name}.html"
     with open(path, "w", encoding="utf-8") as f:
         f.write(page.content())
     logger.info("Saved page HTML to %s", path)
@@ -275,6 +307,8 @@ def scrape(
     _profile_dir = profile_dir or BROWSER_PROFILE_DIR
     _username = username or Config.HSBC_USERNAME
     _password = password or Config.HSBC_PASSWORD
+
+    _init_run_dir()
 
     _profile_dir.mkdir(parents=True, exist_ok=True)
     logger.info("Using persistent browser profile at %s", _profile_dir)
